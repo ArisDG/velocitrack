@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "velocitrack"
+version = "0.1.0"
+description = "A FastAPI + PostgreSQL system for velocity models"
+authors = [
+    { name="Aristeidis Bifis", email="bifis@ceid.upatras.gr" }
+]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "psycopg",
+    "psycopg2-binary",
+    "sqlalchemy",
+    "pydantic",
+    "openpyxl",
+    "pandas",
+    "python-dotenv",
+    "alembic",
+    "gunicorn",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+velocitrack = ["resources/*.txt", "resources/*.mod"]
