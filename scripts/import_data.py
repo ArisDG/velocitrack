@@ -16,6 +16,7 @@ from velocitrack.models import (
     VelocityModel1D,
     VelocityModel3D_VP,
     VelocityModel3D_VS,
+    AuthorBibref,
 )
 
 # Create tables if they don't exist
@@ -234,10 +235,77 @@ def import_3d_from_file(filepath: str, wave_type: str):
         session.close()
 
 
+def import_bibrefs_from_file(filepath: str):
+    """Import author-bibref mappings from a file"""
+    try:
+        import pandas as pd
+
+        # Try to read as CSV or Excel
+        if filepath.endswith(".csv"):
+            df = pd.read_csv(filepath)
+        elif filepath.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(filepath)
+        else:
+            print(f"Unsupported file format: {filepath}")
+            return False
+
+        # Expected columns: Author, Bibref
+        required_columns = ["Author", "Bibref"]
+
+        # Check if all required columns exist
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            print(f"Missing required columns: {missing_columns}")
+            print(f"Available columns: {list(df.columns)}")
+            return False
+
+        imported_count = 0
+        updated_count = 0
+        for _, row in df.iterrows():
+            author = str(row["Author"]).strip()
+            bibref = str(row["Bibref"]).strip()
+
+            # Check if this author already exists
+            existing = (
+                session.query(AuthorBibref)
+                .filter_by(author=author)
+                .first()
+            )
+
+            if existing:
+                # Update the bibref if it's different
+                if existing.bibref != bibref:
+                    existing.bibref = bibref
+                    updated_count += 1
+                continue
+
+            author_bibref = AuthorBibref(
+                author=author,
+                bibref=bibref,
+            )
+            session.add(author_bibref)
+            imported_count += 1
+
+        session.commit()
+        print(
+            f"Successfully imported {imported_count} author-bibref records from {filepath}."
+        )
+        if updated_count > 0:
+            print(f"Updated {updated_count} existing records.")
+        return True
+
+    except Exception as e:
+        session.rollback()
+        print(f"Error importing bibref data from file: {e}")
+        return False
+    finally:
+        session.close()
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python import_data.py <model_type> <filepath> [wave_type]")
-        print("Model types: 1d, 3d")
+        print("Model types: 1d, 3d, bibref")
         print("Wave type (for 3d only): vp, vs")
         print("Supported formats: CSV (.csv), Excel (.xlsx, .xls)")
         print()
@@ -251,11 +319,13 @@ if __name__ == "__main__":
             "3D VS model required columns: Longitude, Latitude, Depth, Vs, NFO, Author"
         )
         print("3D model optional columns: R")
+        print("Bibref model required columns: Author, Bibref")
         print()
         print("Examples:")
         print("  python import_data.py 1d data.xlsx")
         print("  python import_data.py 3d data.xlsx vp")
         print("  python import_data.py 3d data.xlsx vs")
+        print("  python import_data.py bibref bibrefs.csv")
         sys.exit(1)
 
     if len(sys.argv) < 3:
@@ -280,9 +350,11 @@ if __name__ == "__main__":
 
         wave_type = sys.argv[3].lower()
         success = import_3d_from_file(filepath, wave_type)
+    elif model_type == "bibref":
+        success = import_bibrefs_from_file(filepath)
     else:
         print(f"Invalid model type: {model_type}")
-        print("Valid model types: 1d, 3d")
+        print("Valid model types: 1d, 3d, bibref")
         sys.exit(1)
 
     if success:

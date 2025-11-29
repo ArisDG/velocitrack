@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Query, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from typing import Literal
 from sqlalchemy.orm import Session
@@ -10,6 +11,7 @@ from velocitrack.models import (
     VelocityModel1D,
     VelocityModel3D_VP,
     VelocityModel3D_VS,
+    AuthorBibref,
 )
 from velocitrack.config import API_TITLE, API_DESCRIPTION
 import velocitrack
@@ -23,8 +25,22 @@ app = FastAPI(
     version=velocitrack.__version__,
 )
 
+# Add CORS middleware to allow cross-origin requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
-def create_text_response_1d(models: list) -> str:
+def get_bibref_for_author(db: Session, author: str) -> str:
+    """Get bibliographic reference for an author from the database"""
+    result = db.query(AuthorBibref).filter(AuthorBibref.author.ilike(f"%{author}%")).first()
+    return result.bibref if result else ""
+
+
+def create_text_response_1d(models: list, bibref: str = "", total_count: int = 0, offset: int = 0, limit: int = 0) -> str:
     """Create VELEST format response for 1D velocity models"""
     if not models:
         return ""
@@ -39,10 +55,16 @@ def create_text_response_1d(models: list) -> str:
 
     lines = []
 
-    # Header - use NFO and author info to create title
-    author = models[0].author if models else "Unknown"
+    # Header - use NFO and bibref to create title
     nfo = models[0].nfo if models else "Unknown"
-    lines.append(f"{author} model - {nfo}")
+    if bibref:
+        lines.append(f"1D {nfo} {bibref}")
+    else:
+        lines.append(f"1D {nfo}")
+
+    # Add pagination info if there's more data
+    if total_count > len(models):
+        lines.append(f"# Showing {offset + 1}-{offset + len(models)} of {total_count} records (limit={limit}, offset={offset})")
 
     # VP section
     if vp_models:
@@ -108,13 +130,16 @@ async def query_3d_velocity_models(
     wave_type: Literal["VP", "VS"] = Query(..., description="Wave type (VP or VS)"),
     author: str = Query(..., description="Author/reference to filter by"),
     include_r: bool = Query(
-        True, description="Include R column in output (default: true)"
+        False, description="Include R column in output (default: false)"
     ),
+    limit: int = Query(10000, ge=1, le=100000, description="Maximum number of records to return (default: 10000, max: 100000)"),
+    offset: int = Query(0, ge=0, description="Number of records to skip (default: 0)"),
 ):
     """
     Query 3D velocity models by wave type and author
 
-    Returns all 3D velocity model data for the specified wave type and author in tab-delimited text format.
+    Returns 3D velocity model data for the specified wave type and author in tab-delimited text format.
+    Use limit and offset for pagination when dealing with large datasets.
     """
     try:
         # Get database session
@@ -126,6 +151,27 @@ async def query_3d_velocity_models(
             else:
                 model_class = VelocityModel3D_VS
 
+            # Get total count first
+            total_count = (
+                db.query(model_class)
+                .filter(model_class.author.ilike(f"%{author}%"))
+                .count()
+            )
+
+            # Check if no data exists at all
+            if total_count == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No {wave_type} data found for author: {author}",
+                )
+
+            # Check if offset exceeds available data
+            if offset >= total_count:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Offset {offset} exceeds total records ({total_count}). Max offset: {total_count - 1}",
+                )
+
             # Build query - filter by author and order by longitude, latitude, depth
             query = (
                 db.query(model_class)
@@ -135,20 +181,18 @@ async def query_3d_velocity_models(
                     model_class.latitude.asc(),
                     model_class.depth.asc(),
                 )
+                .offset(offset)
+                .limit(limit)
             )
 
             # Execute query
             models = query.all()
 
-            # Check if no data
-            if not models:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"No {wave_type} data found for author: {author}",
-                )
+            # Get bibref for the author
+            bibref = get_bibref_for_author(db, author)
 
-            # Return tab-delimited text format
-            content = create_text_response_3d(models, wave_type, include_r)
+            # Return tab-delimited text format with pagination info
+            content = create_text_response_3d(models, wave_type, include_r, bibref, total_count, offset, limit)
             return PlainTextResponse(content=content)
 
         finally:
@@ -259,16 +303,43 @@ async def get_nfos(db: Session = Depends(get_db)):
 async def query_1d_velocity_models(
     author: str = Query(..., description="Author/reference to filter by"),
     nfo: str = Query(..., description="Network/Organization identifier to filter by"),
+    limit: int = Query(10000, ge=1, le=100000, description="Maximum number of records to return (default: 10000, max: 100000)"),
+    offset: int = Query(0, ge=0, description="Number of records to skip (default: 0)"),
 ):
     """
     Query 1D velocity models by author and NFO
 
-    Returns all velocity model data for the specified author and NFO in VELEST format.
+    Returns velocity model data for the specified author and NFO in VELEST format.
+    Use limit and offset for pagination when dealing with large datasets.
     """
     try:
         # Get database session
         db = next(get_db())
         try:
+            # Get total count first
+            total_count = (
+                db.query(VelocityModel1D)
+                .filter(
+                    VelocityModel1D.author.ilike(f"%{author}%"),
+                    VelocityModel1D.nfo.ilike(f"%{nfo}%"),
+                )
+                .count()
+            )
+
+            # Check if no data exists at all
+            if total_count == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No data found for author: {author} and NFO: {nfo}",
+                )
+
+            # Check if offset exceeds available data
+            if offset >= total_count:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Offset {offset} exceeds total records ({total_count}). Max offset: {total_count - 1}",
+                )
+
             # Build query - filter by author and NFO, order by depth
             query = (
                 db.query(VelocityModel1D)
@@ -277,20 +348,18 @@ async def query_1d_velocity_models(
                     VelocityModel1D.nfo.ilike(f"%{nfo}%"),
                 )
                 .order_by(VelocityModel1D.depth.asc())
+                .offset(offset)
+                .limit(limit)
             )
 
             # Execute query
             models = query.all()
 
-            # Check if no data
-            if not models:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"No data found for author: {author} and NFO: {nfo}",
-                )
+            # Get bibref for the author
+            bibref = get_bibref_for_author(db, author)
 
-            # Return text format
-            content = create_text_response_1d(models)
+            # Return text format with pagination info
+            content = create_text_response_1d(models, bibref, total_count, offset, limit)
             return PlainTextResponse(content=content)
 
         finally:
@@ -303,30 +372,37 @@ async def query_1d_velocity_models(
 
 
 def create_text_response_3d(
-    models: list, wave_type: str, include_r: bool = True
+    models: list, wave_type: str, include_r: bool = True, bibref: str = "",
+    total_count: int = 0, offset: int = 0, limit: int = 0
 ) -> str:
     """Create tab-delimited text format response for 3D velocity models"""
     if not models:
         return ""
 
-    # Check if any R values are not 1.0 - if so, force display R column
+    # Only show R column if user requested it AND there are non-default R values
     has_non_default_r = any(model.r != 1.0 for model in models)
-    show_r = include_r or has_non_default_r
+    show_r = include_r and has_non_default_r
 
     lines = []
 
-    # Header - use NFO and author info to create title (similar to 1D)
-    author = models[0].author if models else "Unknown"
+    # Header - use NFO and bibref to create title
     nfo = models[0].nfo if models else "Unknown"
-    lines.append(f"{author} - {nfo}")
+    if bibref:
+        lines.append(f"3D {nfo} {bibref}")
+    else:
+        lines.append(f"3D {nfo}")
+
+    # Add pagination info if there's more data
+    if total_count > len(models):
+        lines.append(f"# Showing {offset + 1}-{offset + len(models)} of {total_count} records (limit={limit}, offset={offset})")
 
     # Create column header
     if show_r:
-        header = "Longitude    Latitude    Depth    {}    R".format(
+        header = "Longitude|Latitude|Depth|{}|R".format(
             "Vp" if wave_type == "VP" else "Vs"
         )
     else:
-        header = "Longitude    Latitude    Depth    {}".format(
+        header = "Longitude|Latitude|Depth|{}".format(
             "Vp" if wave_type == "VP" else "Vs"
         )
 
@@ -341,11 +417,11 @@ def create_text_response_3d(
         if show_r:
             r_value = model.r if model.r is not None else 1.0
             lines.append(
-                f"{model.longitude}    {model.latitude}    {model.depth}    {velocity}    {r_value}"
+                f"{model.longitude}|{model.latitude}|{model.depth}|{velocity}|{r_value}"
             )
         else:
             lines.append(
-                f"{model.longitude}    {model.latitude}    {model.depth}    {velocity}"
+                f"{model.longitude}|{model.latitude}|{model.depth}|{velocity}"
             )
 
     return "\n".join(lines)

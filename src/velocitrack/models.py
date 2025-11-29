@@ -37,3 +37,11 @@ class VelocityModel3D_VS(Base):
     r = Column(Float)  # R parameter (optional)
     nfo = Column(String, nullable=False, index=True)  # Network/Organization identifier
     author = Column(String, nullable=False, index=True)  # Reference/source
+
+
+class AuthorBibref(Base):
+    __tablename__ = "author_bibrefs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    author = Column(String, nullable=False, unique=True, index=True)  # Author name
+    bibref = Column(String, nullable=False)  # Bibliographic reference
